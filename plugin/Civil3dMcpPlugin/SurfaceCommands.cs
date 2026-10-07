@@ -1,3 +1,4 @@
+using Autodesk.Civil.ApplicationServices;
 using System.Text.Json.Nodes;
 using Autodesk.AutoCAD.DatabaseServices;
 using Autodesk.AutoCAD.Geometry;
@@ -214,7 +215,9 @@ public static class SurfaceCommands
       var compSurface = FindSurfaceByName(civilDoc, tr, compName) as TinSurface
         ?? throw new JsonRpcDispatchException("CIVIL3D.INVALID_INPUT", $"'{compName}' is not a TIN surface.");
 
-      var props = baseSurface.GetVolumeProperties(compSurface);
+      var volId = TinVolumeSurface.Create("_mcp_tmp_vol_" + Guid.NewGuid().ToString("N"), baseSurface.ObjectId, compSurface.ObjectId);
+      var volSurface = (TinVolumeSurface)tr.GetObject(volId, OpenMode.ForRead);
+      var props = volSurface.GetVolumeProperties();
 
       return new
       {
@@ -225,6 +228,110 @@ public static class SurfaceCommands
         netVolume = props.UnadjustedCutVolume - props.UnadjustedFillVolume,
       };
     });
+  }
+
+  // ── Batch sampling (TCCE) ──
+
+  /// <summary>
+  /// Samples the surface on a regular grid. If outputPath is given, writes a CSV (x,y,z; z empty
+  /// outside the surface) and returns only a summary; otherwise returns the grid inline
+  /// (row-major from minY, z rounded to 0.01, null outside), limited to 40,000 cells.
+  /// </summary>
+  public static Task<object?> SampleSurfaceGridAsync(JsonObject? parameters)
+  {
+    var name = PluginRuntime.GetRequiredString(parameters, "name");
+    var minX = PluginRuntime.GetRequiredDouble(parameters, "minX");
+    var minY = PluginRuntime.GetRequiredDouble(parameters, "minY");
+    var maxX = PluginRuntime.GetRequiredDouble(parameters, "maxX");
+    var maxY = PluginRuntime.GetRequiredDouble(parameters, "maxY");
+    var spacing = PluginRuntime.GetRequiredDouble(parameters, "spacing");
+    var outputPath = PluginRuntime.GetOptionalString(parameters, "outputPath");
+
+    if (spacing <= 0 || maxX <= minX || maxY <= minY)
+      throw new JsonRpcDispatchException("CIVIL3D.INVALID_INPUT", "Invalid grid extents or spacing.");
+
+    var nx = (int)Math.Floor((maxX - minX) / spacing) + 1;
+    var ny = (int)Math.Floor((maxY - minY) / spacing) + 1;
+    long cells = (long)nx * ny;
+    if (cells > 4_000_000)
+      throw new JsonRpcDispatchException("CIVIL3D.INVALID_INPUT", $"Grid too large ({cells} cells, max 4,000,000).");
+    if (outputPath == null && cells > 40_000)
+      throw new JsonRpcDispatchException("CIVIL3D.INVALID_INPUT", $"Grid has {cells} cells; pass outputPath (max 40,000 inline).");
+
+    return CivilExecution.ReadAsync<object?>((doc, civilDoc, db, tr) =>
+    {
+      var surface = FindSurfaceByName(civilDoc, tr, name);
+      var inv = System.Globalization.CultureInfo.InvariantCulture;
+      int outside = 0;
+      double zMin = double.MaxValue, zMax = double.MinValue;
+
+      if (outputPath != null)
+      {
+        var dir = System.IO.Path.GetDirectoryName(outputPath);
+        if (!string.IsNullOrEmpty(dir)) System.IO.Directory.CreateDirectory(dir);
+        using var w = new System.IO.StreamWriter(outputPath, false);
+        w.WriteLine("x,y,z");
+        for (int j = 0; j < ny; j++)
+        {
+          var y = minY + j * spacing;
+          for (int i = 0; i < nx; i++)
+          {
+            var x = minX + i * spacing;
+            var z = TryElevation(surface, x, y);
+            if (z == null) { outside++; w.WriteLine(string.Format(inv, "{0:0.##},{1:0.##},", x, y)); continue; }
+            zMin = Math.Min(zMin, z.Value); zMax = Math.Max(zMax, z.Value);
+            w.WriteLine(string.Format(inv, "{0:0.##},{1:0.##},{2:0.##}", x, y, z.Value));
+          }
+        }
+        return new { surfaceName = name, outputPath, minX, minY, spacing, nx, ny, cells, outside,
+          zMin = outside == cells ? (double?)null : zMin, zMax = outside == cells ? (double?)null : zMax };
+      }
+
+      var zs = new double?[cells];
+      for (int j = 0; j < ny; j++)
+        for (int i = 0; i < nx; i++)
+        {
+          var z = TryElevation(surface, minX + i * spacing, minY + j * spacing);
+          if (z == null) outside++;
+          zs[j * nx + i] = z == null ? null : Math.Round(z.Value, 2);
+        }
+      return new { surfaceName = name, minX, minY, spacing, nx, ny, cells, outside, order = "row-major from minY", z = zs };
+    });
+  }
+
+  /// <summary>Elevations at a list of XY points (null outside the surface).</summary>
+  public static Task<object?> GetSurfaceElevationsAsync(JsonObject? parameters)
+  {
+    var name = PluginRuntime.GetRequiredString(parameters, "name");
+    var pts = parameters?["points"] as JsonArray;
+    if (pts == null || pts.Count == 0)
+      throw new JsonRpcDispatchException("CIVIL3D.INVALID_INPUT", "Parameter 'points' is required.");
+    if (pts.Count > 20_000)
+      throw new JsonRpcDispatchException("CIVIL3D.INVALID_INPUT", "Max 20,000 points per call.");
+
+    var xy = new List<(double x, double y)>(pts.Count);
+    foreach (var p in pts)
+      xy.Add((p!["x"]!.GetValue<double>(), p["y"]!.GetValue<double>()));
+
+    return CivilExecution.ReadAsync<object?>((doc, civilDoc, db, tr) =>
+    {
+      var surface = FindSurfaceByName(civilDoc, tr, name);
+      var z = new double?[xy.Count];
+      int outside = 0;
+      for (int k = 0; k < xy.Count; k++)
+      {
+        var e = TryElevation(surface, xy[k].x, xy[k].y);
+        if (e == null) outside++;
+        z[k] = e == null ? null : Math.Round(e.Value, 3);
+      }
+      return new { surfaceName = name, count = xy.Count, outside, z };
+    });
+  }
+
+  private static double? TryElevation(Autodesk.Civil.DatabaseServices.Surface surface, double x, double y)
+  {
+    try { return surface.FindElevationAtXY(x, y); }
+    catch { return null; }
   }
 
   // ── Helpers ──

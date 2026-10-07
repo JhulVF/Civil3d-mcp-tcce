@@ -17,6 +17,8 @@ const SurfaceActionSchema = z.enum([
   "add_boundary",
   "extract_contours",
   "compute_volume",
+  "sample_grid",
+  "get_elevations",
 ]);
 
 const canonicalInputShape = {
@@ -35,6 +37,13 @@ const canonicalInputShape = {
   majorInterval: z.number().optional().describe("Major contour interval."),
   baseSurface: z.string().optional().describe("Base surface for volume calculation."),
   comparisonSurface: z.string().optional().describe("Comparison surface for volume calculation."),
+  xyPoints: z.array(Point2DSchema).optional().describe("get_elevations: XY points (max 20,000)."),
+  minX: z.number().optional().describe("sample_grid: grid min X."),
+  minY: z.number().optional().describe("sample_grid: grid min Y."),
+  maxX: z.number().optional().describe("sample_grid: grid max X."),
+  maxY: z.number().optional().describe("sample_grid: grid max Y."),
+  spacing: z.number().optional().describe("sample_grid: grid spacing (drawing units)."),
+  outputPath: z.string().optional().describe("sample_grid: write CSV (x,y,z) to this path on the Civil 3D machine instead of returning the grid inline (required above 40,000 cells)."),
 };
 
 export const SURFACE_DOMAIN_DEFINITION: DomainToolDefinition = {
@@ -243,6 +252,54 @@ export const SURFACE_DOMAIN_DEFINITION: DomainToolDefinition = {
           })
         ),
     },
+    sample_grid: {
+      action: "sample_grid",
+      inputSchema: z.object({
+        action: z.literal("sample_grid"),
+        name: z.string(),
+        minX: z.number(),
+        minY: z.number(),
+        maxX: z.number(),
+        maxY: z.number(),
+        spacing: z.number().positive(),
+        outputPath: z.string().optional(),
+      }),
+      capabilities: ["query", "analyze", "export"],
+      requiresActiveDrawing: true,
+      safeForRetry: true,
+      pluginMethods: ["sampleSurfaceGrid"],
+      execute: async (args: any) =>
+        await withApplicationConnection(async (c) =>
+          await c.sendCommand("sampleSurfaceGrid", {
+            name: args.name,
+            minX: args.minX,
+            minY: args.minY,
+            maxX: args.maxX,
+            maxY: args.maxY,
+            spacing: args.spacing,
+            outputPath: args.outputPath,
+          })
+        ),
+    },
+    get_elevations: {
+      action: "get_elevations",
+      inputSchema: z.object({
+        action: z.literal("get_elevations"),
+        name: z.string(),
+        xyPoints: z.array(Point2DSchema).min(1).max(20000),
+      }),
+      capabilities: ["query", "analyze"],
+      requiresActiveDrawing: true,
+      safeForRetry: true,
+      pluginMethods: ["getSurfaceElevations"],
+      execute: async (args: any) =>
+        await withApplicationConnection(async (c) =>
+          await c.sendCommand("getSurfaceElevations", {
+            name: args.name,
+            points: args.xyPoints,
+          })
+        ),
+    },
   },
   exposures: [
     {
@@ -251,7 +308,9 @@ export const SURFACE_DOMAIN_DEFINITION: DomainToolDefinition = {
       description:
         "Manage Civil 3D surfaces. Actions: list, get (by name), get_elevation (at X,Y), " +
         "get_statistics, create, delete, add_points, add_breakline, add_boundary, " +
-        "extract_contours, compute_volume (between two surfaces).",
+        "extract_contours, compute_volume (between two surfaces), " +
+        "sample_grid (regular grid of elevations; CSV to outputPath for large grids), " +
+        "get_elevations (elevations at a list of XY points).",
       inputShape: canonicalInputShape,
       supportedActions: [
         "list",
@@ -265,6 +324,8 @@ export const SURFACE_DOMAIN_DEFINITION: DomainToolDefinition = {
         "add_boundary",
         "extract_contours",
         "compute_volume",
+        "sample_grid",
+        "get_elevations",
       ],
       resolveAction: (rawArgs) => ({
         action: String(rawArgs.action),

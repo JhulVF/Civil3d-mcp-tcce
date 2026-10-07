@@ -20,7 +20,7 @@ public static class DrawingCommands
       {
         connected = true,
         drawingName = doc.Name,
-        civil3dVersion = CivilApplication.ActiveProduct?.Name ?? "Civil 3D",
+        civil3dVersion = CivilApplication.ActiveProduct.ToString(),
       };
     });
   }
@@ -97,7 +97,7 @@ public static class DrawingCommands
 
       if (civilDoc.GetSurfaceIds().Count > 0) types.Add("Surface");
       if (civilDoc.GetAlignmentIds().Count > 0) types.Add("Alignment");
-      if (civilDoc.GetCorridorIds().Count > 0) types.Add("Corridor");
+      if (civilDoc.CorridorCollection.Count > 0) types.Add("Corridor");
       if (civilDoc.GetSiteIds().Count > 0) types.Add("Site/Parcel");
 
       // Always show available types even if none exist

@@ -1,3 +1,4 @@
+using Autodesk.Civil.ApplicationServices;
 using System.Text.Json.Nodes;
 using Autodesk.AutoCAD.DatabaseServices;
 using Autodesk.Civil.DatabaseServices;
@@ -10,7 +11,7 @@ public static class CorridorCommands
   {
     return CivilExecution.ReadAsync<object?>((doc, civilDoc, db, tr) =>
     {
-      var corridorIds = civilDoc.GetCorridorIds();
+      var corridorIds = civilDoc.CorridorCollection;
       var corridors = new List<object>();
       foreach (ObjectId id in corridorIds)
       {
@@ -43,7 +44,7 @@ public static class CorridorCommands
 
   private static Corridor FindByName(CivilDocument cd, Transaction tr, string name)
   {
-    foreach (ObjectId id in cd.GetCorridorIds())
+    foreach (ObjectId id in cd.CorridorCollection)
     {
       var c = tr.GetObject(id, OpenMode.ForRead) as Corridor;
       if (c != null && string.Equals(c.Name, name, StringComparison.OrdinalIgnoreCase)) return c;
